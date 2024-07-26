@@ -11,6 +11,9 @@
 typedef struct {
     ngx_http_complex_value_t *realm;
     ngx_http_complex_value_t *totp_file;
+    ngx_int_t skew;
+    time_t start;
+    time_t step;
 }
 ngx_http_auth_totp_loc_conf_t;
 
