@@ -16,6 +16,18 @@ To build the nginx-http-auth-totp module from the Nginx source directory:
 
 ## Configuration
 
+    server {
+        listen 80;
+
+        location /protected {
+            auth_totp_realm "Protected";
+            auth_totp_file /etc/nginx/totp.conf;
+            auth_totp_length 8;
+            auth_totp_skew 1;
+            auth_totp_step 1m;
+        }
+    }
+
 ## Directives
 
 ### auth_totp_file
@@ -24,7 +36,9 @@ To build the nginx-http-auth-totp module from the Nginx source directory:
 * **default:** -
 * **context:** `http`, `server`, `location`, `limit_except`
 
-Specifies the file that contains usernames, shared secrets, and optionally, the UNIX start time, time step in seconds, and password truncation length, for time-based one-time password authentication. This file should employ the following format:
+Specifies the file that contains usernames, shared secrets, and optionally, the UNIX start time, time step in seconds, and password truncation length, for time-based one-time password authentication. 
+
+This configuration file has the format:
 
     # comment
     user1:secret1

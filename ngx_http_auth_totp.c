@@ -10,7 +10,7 @@
 #include "ngx_http_auth_totp.h"
 
 
-static uint32_t algo_hotp(u_char *key, size_t length, uint64_t count, size_t digits);
+static uint32_t ngx_http_auth_totp_algorithm_hotp(u_char *key, size_t length, uint64_t count, size_t digits);
 
 static void * ngx_http_auth_totp_create_loc_conf(ngx_conf_t *cf);
 
@@ -105,7 +105,7 @@ ngx_module_t ngx_http_auth_totp_module = {
 
 
 static uint32_t 
-algo_hotp(u_char *key, size_t length, uint64_t count, size_t digits) {
+ngx_http_auth_totp_algorithm_hotp(u_char *key, size_t length, uint64_t count, size_t digits) {
     uint64_t value;
     uint32_t bin;
     uint8_t buffer[8], offset, *result;
@@ -445,6 +445,14 @@ ngx_http_auth_totp_validation(ngx_http_request_t *r, ngx_str_t *realm, u_char *k
     u_char buffer[8];
     time_t now;
 
+    /*
+        This function is intended to validate the time-based one-time password (TOTP) 
+        provided by the user, using the HMAC secret, UNIX start time, time step size 
+        and truncation length provided. This function additionally loops through the 
+        current and previous time steps when performing the TOTP calculation to 
+        accommodate skew configuration.
+    */
+
     lcf = ngx_http_get_module_loc_conf(r, ngx_http_auth_totp_module);
     /* assert(lcf != NULL); */
     digits = (digits < 1) ? 1 : digits;
@@ -462,8 +470,15 @@ ngx_http_auth_totp_validation(ngx_http_request_t *r, ngx_str_t *realm, u_char *k
     for (index = 0; index <= (uint64_t)lcf->skew; index++) {
         /* assert(count >= index); */
         ngx_snprintf(buffer, sizeof(buffer), "%0*i", 
-                digits, algo_hotp(key, length, count - index, digits));
+                digits, ngx_http_auth_totp_algorithm_hotp(key, length, count - index, digits));
         if (ngx_strncmp(r->headers_in.passwd.data, buffer, digits) == 0) {
+            ngx_log_error(NGX_LOG_INFO, r->connection->log, 0,
+                    "user \"%*s\", code %*s, skew %ui",
+                    r->headers_in.user.len,
+                    r->headers_in.user.data,
+                    digits,
+                    buffer,
+                    index);
             return NGX_OK;
         }
     }
