@@ -24,15 +24,28 @@ To build the nginx-http-auth-totp module from the Nginx source directory:
 * **default:** -
 * **context:** `http`, `server`, `location`, `limit_except`
 
-Specifies the file that contains usernames, shared secrets, and optionally, time step in seconds and UNIX start time, for time-based one-time password authentication. This file should employ the following format:
+Specifies the file that contains usernames, shared secrets, and optionally, the UNIX start time, time step in seconds, and password truncation length, for time-based one-time password authentication. This file should employ the following format:
 
     # comment
     user1:secret1
-    user2:secret2:step2
-    user3:secret3:step3:start3
-    user4:secret4
+    user2:secret2:start2
+    user3:secret3:start3:step3
+    user4:secret4:start4:step4:length4
+    user5:secret5
 
-If a time step in seconds or UNIX start time (in seconds since 1970/01/01) is specified in association with a user definition within this file, these values will override any values defined independently via the configuration directives `auth_totp_start` and `auth_totp_step`.
+If the UNIX start time (in seconds since 1970/01/01), the time step size (in seconds), or the password truncation length, is specified in association with a user definition within this file, these values will override any values defined independently via the configuration directives `auth_totp_start`, `auth_totp_step` or `auth_totp_length`.
+
+If the UNIX start time is specified - either within the TOTP definition file or by way of the `auth_totp_start` configuration directive - and represents a time in the future, the authentication request for the given user account will fail.
+
+### auth_totp_length
+
+* **syntax:** `auth_totp_length <number>`
+* **default:** `6`
+* **context:** `http`, `server`, `location`, `limit_except`
+
+Specifies the truncation length of the Time-based One-Time Password (TOTP) code. This truncation length may be between 1 and 8 digits inclusively.
+
+If the supplied TOTP is of a different length to this value, the authentication request will fail.
 
 ### auth_totp_realm
 
@@ -44,8 +57,8 @@ Enables validation of user name and time-based one-time password using the "HTTP
 
 ### auth_totp_skew
 
-* **syntax:** `auth_totp_skew <digit>`
-* **default:** `0`
+* **syntax:** `auth_totp_skew <number>`
+* **default:** `1`
 * **context:** `http`, `server`, `location`, `limit_except`
 
 Specifies the number of time steps by which the time base between the issuing and validating TOTP systems.
@@ -60,15 +73,19 @@ It is important to note that larger acceptable delay windows represent a larger 
 * **default:** `0`
 * **context:** `http`, `server`, `location`, `limit_except`
 
-Specifies the UNIX time from which to start counting time steps. 
+Specifies the UNIX time from which to start counting time steps as part of TOTP algorithm operations.
 
-The default value is 0, the UNIX epoch at 1970/01/01.
+The default value is 0, the UNIX epoch at 1970/01/01. 
+
+If the UNIX start time specified - either within this directive or in the configuration file specified by the `auth_totp_file` directive - represents a time in the future, authentication will be denied.
 
 ### auth_totp_step
 
 * **syntax:** `auth_totp_step <interval>`
 * **default:** `30s`
 * **context:** `http`, `server`, `location`, `limit_except`
+
+Specifies the time step as part of TOTP algorithm operations.
 
 ## References
 

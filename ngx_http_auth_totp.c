@@ -1,9 +1,16 @@
+#include <stdint.h>
+#include <time.h>
+
 #include <ngx_config.h>
 #include <ngx_core.h>
 #include <ngx_http.h>
 
+#include <openssl/hmac.h>
+
 #include "ngx_http_auth_totp.h"
 
+
+static uint32_t algo_hotp(u_char *key, size_t length, uint64_t count, size_t digits);
 
 static void * ngx_http_auth_totp_create_loc_conf(ngx_conf_t *cf);
 
@@ -17,6 +24,11 @@ static char * ngx_http_auth_totp_merge_loc_conf(ngx_conf_t *cf, void *parent, vo
 
 static ngx_int_t ngx_http_auth_totp_set_realm(ngx_http_request_t *r, ngx_str_t *realm);
 
+static ngx_int_t ngx_http_auth_totp_validation(ngx_http_request_t *r, ngx_str_t *realm, u_char *key, size_t length, time_t start, time_t step, size_t digits);
+
+
+static ngx_int_t powi[] = { 1, 10, 100, 1000, 10000, 100000, 1000000, 10000000, 100000000 };
+
 
 static ngx_command_t ngx_http_auth_totp_directives[] = {
 
@@ -25,6 +37,13 @@ static ngx_command_t ngx_http_auth_totp_directives[] = {
             ngx_http_auth_totp_file,
             NGX_HTTP_LOC_CONF_OFFSET,
             offsetof(ngx_http_auth_totp_loc_conf_t, totp_file),
+            NULL },
+
+    { ngx_string("auth_totp_length"),
+            NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_HTTP_LMT_CONF|NGX_CONF_TAKE1,
+            ngx_conf_set_num_slot,
+            NGX_HTTP_LOC_CONF_OFFSET,
+            offsetof(ngx_http_auth_totp_loc_conf_t, length),
             NULL },
 
     { ngx_string("auth_totp_realm"),
@@ -85,6 +104,36 @@ ngx_module_t ngx_http_auth_totp_module = {
 };
 
 
+static uint32_t 
+algo_hotp(u_char *key, size_t length, uint64_t count, size_t digits) {
+    uint64_t value;
+    uint32_t bin;
+    uint8_t buffer[8], offset, *result;
+    int index;
+
+    /*
+        This function implements the hash-based one-time password (HTOP) algorithm 
+        as defined in RFC 4226, which serves as the base of the time-based one-time 
+        password (TOTP) algorithm defined in RFC 6238.
+    */
+
+    //  Step 1: Generate HMAC-SHA-1 value
+    for (value = count, index = 7; index >= 0; index--) {
+        buffer[index] = (uint8_t)(value & 0xff);
+        value >>= 8;
+    }
+    result = HMAC(EVP_sha1(), key, length, (const unsigned char *)buffer, sizeof(buffer), NULL, 0);
+    //  Step 2: Generate four-byte string (dynamic truncation)
+    offset = result[19] & 0x0f;
+    bin = ((result[offset] & 0x7f) << 24) |
+            ((result[offset + 1] & 0xff) << 16) |
+            ((result[offset + 2] & 0xff) << 8) |
+            (result[offset + 3] & 0xff);
+    //  Step 3: Compute HOTP value
+    return (bin % powi[digits]);
+}
+
+
 static void * 
 ngx_http_auth_totp_create_loc_conf(ngx_conf_t *cf) {
     ngx_http_auth_totp_loc_conf_t *lcf;
@@ -95,6 +144,7 @@ ngx_http_auth_totp_create_loc_conf(ngx_conf_t *cf) {
     }
     lcf->realm = NGX_CONF_UNSET_PTR;
     lcf->totp_file = NGX_CONF_UNSET_PTR;
+    lcf->length = NGX_CONF_UNSET;
     lcf->skew = NGX_CONF_UNSET;
     lcf->start = NGX_CONF_UNSET;
     lcf->step = NGX_CONF_UNSET;
@@ -138,8 +188,15 @@ ngx_http_auth_totp_file(ngx_conf_t *cf, ngx_command_t *cmd, void *conf) {
 static ngx_int_t 
 ngx_http_auth_totp_handler(ngx_http_request_t *r) {
     ngx_http_auth_totp_loc_conf_t *lcf;
-    ngx_str_t realm;
+    ngx_err_t err;
+    ngx_fd_t fd;
+    ngx_file_t file;
     ngx_int_t rc;
+    ngx_str_t filename, realm;
+    ngx_uint_t count, index, length, level, state;
+    u_char buffer[NGX_HTTP_AUTH_TOTP_BUF_SIZE];
+    off_t offset;
+    ssize_t rv;
 
     lcf = ngx_http_get_module_loc_conf(r, ngx_http_auth_totp_module);
     if ((lcf->realm == NULL) ||
@@ -151,12 +208,17 @@ ngx_http_auth_totp_handler(ngx_http_request_t *r) {
         return NGX_ERROR;
     }
     if ((realm.len == 3) &&
-            (ngx_strncmp(realm.data, "off", 3) == 0)) {
+            (ngx_strncasecmp(realm.data, (u_char *)"off", 3) == 0)) {
         return NGX_DECLINED;
     }
 
     /* Session handling code here */
 
+    /*
+        If the client has not provided username and/or password, the WWW-Authenticate 
+        header is sent to demand basic authentication.
+    */
+    
     rc = ngx_http_auth_basic_user(r);
     if (rc == NGX_DECLINED) {
         ngx_log_error(NGX_LOG_INFO, r->connection->log, 0,
@@ -167,9 +229,148 @@ ngx_http_auth_totp_handler(ngx_http_request_t *r) {
         return NGX_HTTP_INTERNAL_SERVER_ERROR;
     }
 
-    /* File handling code here */
+    /*
+        The following code is intended to perform parsing of the TOTP configuration 
+        file to read the parameters to be employed in association witht he TOTP 
+        algorithm based on the user name included in Basic Authentication headers.
+    */
 
-    return NGX_OK;
+    if (ngx_http_complex_value(r, lcf->totp_file, &filename) != NGX_OK) {
+        return NGX_ERROR;
+    }
+
+    fd = ngx_open_file(filename.data, NGX_FILE_RDONLY, NGX_FILE_OPEN, 0);
+    if (fd == NGX_INVALID_FILE) {
+        err = ngx_errno;
+
+        if (err == NGX_ENOENT) {
+            level = NGX_LOG_ERR;
+            rc = NGX_HTTP_FORBIDDEN;
+        }
+        else {
+            level = NGX_LOG_CRIT;
+            rc = NGX_HTTP_INTERNAL_SERVER_ERROR;
+        }
+
+        ngx_log_error(level, r->connection->log, err,
+                ngx_open_file_n " \"%s\" failed", filename.data);
+
+        return rc;
+    }
+
+    ngx_memzero(&file, sizeof(ngx_file_t));
+    file.fd = fd;
+    file.name = filename;
+    file.log = r->connection->log;
+
+    count = 0;
+    length = 0;
+    offset = 0;
+    state = STATE_USER;
+    rc = NGX_OK;
+
+    for (;;) {
+        rv = ngx_read_file(&file, buffer + count, NGX_HTTP_AUTH_TOTP_BUF_SIZE - count, offset);
+        if (rv == NGX_ERROR) {
+            rc = NGX_HTTP_INTERNAL_SERVER_ERROR;
+            goto finish;
+        }
+        if (rv == 0) {
+            break;
+        }
+
+        /* assert(rv > 0); */
+        for (index = count; index < (count + rv); index++) {
+            switch (state) {
+                case STATE_USER:
+
+                    /*
+                        This parsing code differs from the reference code within the 
+                        src/http/modules/ngx_http_auth_basic_module.c in that matching against the 
+                        user name is not performed until the entire field has been parsed from the 
+                        TOTP file. 
+                    */
+
+                    if (length == 0) {
+                        if ((buffer[index] == '#') ||
+                                (buffer[index] == CR)) {
+                            state = STATE_SKIP;
+                            break;
+                        }
+                        if ((buffer[index] == ' ') ||
+                                (buffer[index] == '\t') ||
+                                (buffer[index] == LF)) {
+                            break;
+                        }
+                    }
+                    if (buffer[index] == ':') {
+                        if (length == 0) {
+
+                            /*
+                                If no user name has been specified within the TOTP file, the line is treated 
+                                as junk and ignored. An alternate approach may however be to use associated 
+                                TOTP algorithm parameters to match any user name provided - This behaviour 
+                                may be adopted in the future.
+                            */
+
+                            state = STATE_SKIP;
+                            break;
+                        }
+                        /* assert(index >= length); */
+                        if ((r->headers_in.user.len != length) ||
+                                (ngx_strncasecmp(r->headers_in.user.data, 
+                                        &buffer[index - length], 
+                                        length) != 0)) {
+                            state = STATE_SKIP;
+                            break;
+                        }
+
+                        state = STATE_SECRET;
+                        length = 0;
+                        break;
+                    }
+
+                    ++length;
+                    break;
+
+                case STATE_SECRET:
+                    if ((buffer[index] == CR) ||
+                            (buffer[index] == LF)) {
+                        rc = ngx_http_auth_totp_validation(r, 
+                                &realm, 
+                                &buffer[index - length], 
+                                length, 
+                                lcf->start, 
+                                lcf->step, 
+                                lcf->length);
+                        goto finish;
+                    }
+                    if (buffer[index] == ':') {
+                    }
+
+                    ++length;
+                    break;
+
+                case STATE_SKIP:
+                default:
+                    if (buffer[index] == LF) {
+                        state = STATE_USER;
+                        length = 0;
+                    }
+                    break;
+            }
+        }
+        offset += rv;
+    }
+
+finish:
+    if (ngx_close_file(file.fd) == NGX_FILE_ERROR) {
+        ngx_log_error(NGX_LOG_ALERT, r->connection->log, ngx_errno,
+                ngx_close_file_n " \"%s\" failed", filename.data);
+    }
+    ngx_explicit_memzero(buffer, NGX_HTTP_AUTH_TOTP_BUF_SIZE);
+
+    return rc;
 }
 
 
@@ -196,6 +397,7 @@ ngx_http_auth_totp_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child) {
 
     ngx_conf_merge_ptr_value(conf->realm, prev->realm, NULL);
     ngx_conf_merge_ptr_value(conf->totp_file, prev->totp_file, NULL);
+    ngx_conf_merge_value(conf->length, prev->length, 6);
     ngx_conf_merge_value(conf->skew, prev->skew, 1);
     ngx_conf_merge_sec_value(conf->start, prev->start, 0);
     ngx_conf_merge_sec_value(conf->step, prev->start, 30);
@@ -234,4 +436,39 @@ ngx_http_auth_totp_set_realm(ngx_http_request_t *r, ngx_str_t *realm) {
 
     return NGX_HTTP_UNAUTHORIZED;
 }
+
+
+static ngx_int_t
+ngx_http_auth_totp_validation(ngx_http_request_t *r, ngx_str_t *realm, u_char *key, size_t length, time_t start, time_t step, size_t digits) {
+    ngx_http_auth_totp_loc_conf_t *lcf;
+    uint64_t count, index;
+    u_char buffer[8];
+    time_t now;
+
+    lcf = ngx_http_get_module_loc_conf(r, ngx_http_auth_totp_module);
+    /* assert(lcf != NULL); */
+    digits = (digits < 1) ? 1 : digits;
+    digits = (digits > 8) ? 8 : digits;
+    if (r->headers_in.passwd.len != digits) {
+        return ngx_http_auth_totp_set_realm(r, realm);
+    }
+
+    now = time(NULL);
+    if (start > now) {
+        return ngx_http_auth_totp_set_realm(r, realm);
+    }
+
+    count = (now - start) / ((step > 0) ? step : 1);
+    for (index = 0; index <= (uint64_t)lcf->skew; index++) {
+        /* assert(count >= index); */
+        ngx_snprintf(buffer, sizeof(buffer), "%0*i", 
+                digits, algo_hotp(key, length, count - index, digits));
+        if (ngx_strncmp(r->headers_in.passwd.data, buffer, digits) == 0) {
+            return NGX_OK;
+        }
+    }
+
+    return ngx_http_auth_totp_set_realm(r, realm);
+}
+
 
