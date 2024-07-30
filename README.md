@@ -6,6 +6,13 @@ The Time-based One-Time Password (TOTP) algorithm, provides a secure mechanism f
 
 The nginx-http-auth-totp module provides TOTP authentication for a Nginx server.
 
+## Features
+
+* HTTP basic authentication using time-based one-time password (TOTP)
+* Cookie-based tracking of authenticated clients beyond TOTP validity window
+* Configurable secret, time reference, time step and truncation length for TOTP generation
+* Configurable time-skew for TOTP validation
+
 ## Build
 
 To build the nginx-http-auth-totp module from the Nginx source directory:
