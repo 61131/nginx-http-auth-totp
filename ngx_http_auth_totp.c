@@ -22,6 +22,8 @@ static ngx_int_t ngx_http_auth_totp_initialise(ngx_conf_t *cf);
 
 static char * ngx_http_auth_totp_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child);
 
+static ngx_int_t ngx_http_auth_totp_set_cookie(ngx_http_request_t *r);
+
 static ngx_int_t ngx_http_auth_totp_set_realm(ngx_http_request_t *r, ngx_str_t *realm);
 
 static ngx_int_t ngx_http_auth_totp_validation(ngx_http_request_t *r, ngx_str_t *realm, u_char *key, size_t length, time_t start, time_t step, size_t digits);
@@ -31,6 +33,20 @@ static ngx_int_t powi[] = { 1, 10, 100, 1000, 10000, 100000, 1000000, 10000000, 
 
 
 static ngx_command_t ngx_http_auth_totp_directives[] = {
+
+    { ngx_string("auth_totp_cookie"),
+            NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_HTTP_LMT_CONF|NGX_CONF_TAKE1,
+            ngx_conf_set_str_slot,
+            NGX_HTTP_LOC_CONF_OFFSET,
+            offsetof(ngx_http_auth_totp_loc_conf_t, cookie),
+            NULL },
+
+    { ngx_string("auth_totp_expiry"),
+            NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_HTTP_LMT_CONF|NGX_CONF_TAKE1,
+            ngx_conf_set_sec_slot,
+            NGX_HTTP_LOC_CONF_OFFSET,
+            offsetof(ngx_http_auth_totp_loc_conf_t, expiry),
+            NULL },
 
     { ngx_string("auth_totp_file"),
             NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_HTTP_LMT_CONF|NGX_CONF_TAKE1,
@@ -148,8 +164,54 @@ ngx_http_auth_totp_create_loc_conf(ngx_conf_t *cf) {
     lcf->skew = NGX_CONF_UNSET;
     lcf->start = NGX_CONF_UNSET;
     lcf->step = NGX_CONF_UNSET;
+    /* lcf->cookie = { 0, NULL }; */
+    lcf->expiry = NGX_CONF_UNSET;
 
     return lcf;
+}
+
+
+static ngx_int_t 
+ngx_http_auth_totp_get_cookie(ngx_http_request_t *r) {
+    ngx_http_auth_totp_loc_conf_t *lcf;
+    ngx_table_elt_t *cookie;
+    ngx_str_t value;
+    uint32_t result, value1, value2;
+    u_char buffer[9];
+
+    /*
+        This function is intended to return true if a HTTP cookie has been set 
+        indicating successful authentication previously by the current HTTP client. 
+    */
+
+    lcf = ngx_http_get_module_loc_conf(r, ngx_http_auth_totp_module);
+    /* assert(lcf != NULL); */
+    cookie = ngx_http_parse_multi_header_lines(r, r->headers_in.cookie,
+            &lcf->cookie,
+            &value);
+    if (cookie == NULL) {
+        return 0;
+    }
+
+    /*
+        It should be noted that the validation mechanism for the cookie value is 
+        very primitive, merely checking to see whether the value appears to have 
+        been set by this module. This is because there is no inherent value in the
+        cookie beyond its' presence in the HTTP request.
+    */
+
+    if (value.len != 24) {
+        return 0;
+    }
+    ngx_memzero(buffer, sizeof(buffer));
+    ngx_memmove(buffer, &value.data[0], 8);
+    value1 = strtoul((char *)buffer, (char **)NULL, 16);
+    ngx_memmove(buffer, &value.data[8], 8);
+    value2 = strtoul((char *)buffer, (char **)NULL, 16);
+    ngx_memmove(buffer, &value.data[16], 8);
+    result = strtoul((char *)buffer, (char **)NULL, 16);
+
+    return ((value1 ^ value2) == result);
 }
 
 
@@ -199,6 +261,7 @@ ngx_http_auth_totp_handler(ngx_http_request_t *r) {
     ssize_t rv;
 
     lcf = ngx_http_get_module_loc_conf(r, ngx_http_auth_totp_module);
+    /* assert(lcf != NULL); */
     if ((lcf->realm == NULL) ||
             (lcf->totp_file == NULL)) {
         return NGX_DECLINED;
@@ -208,11 +271,12 @@ ngx_http_auth_totp_handler(ngx_http_request_t *r) {
         return NGX_ERROR;
     }
     if ((realm.len == 3) &&
-            (ngx_strncasecmp(realm.data, (u_char *)"off", 3) == 0)) {
+            (ngx_strncasecmp(realm.data, (u_char *) "off", 3) == 0)) {
         return NGX_DECLINED;
     }
-
-    /* Session handling code here */
+    if (ngx_http_auth_totp_get_cookie(r) != 0) {
+        return NGX_OK;
+    }
 
     /*
         If the client has not provided username and/or password, the WWW-Authenticate 
@@ -346,9 +410,36 @@ ngx_http_auth_totp_handler(ngx_http_request_t *r) {
                         goto finish;
                     }
                     if (buffer[index] == ':') {
+                        state = STATE_START;
+                        break;
                     }
 
                     ++length;
+                    break;
+
+                case STATE_START:
+                    if ((buffer[index] == CR) ||
+                            (buffer[index] == LF)) {
+                    }
+                    if (buffer[index] == ':') {
+                        state = STATE_STEP;
+                        break;
+                    }
+                    break;
+
+                case STATE_STEP:
+                    if ((buffer[index] == CR) ||
+                            (buffer[index] == LF)) {
+                    }
+                    if (buffer[index] == ':') {
+                        state = STATE_LENGTH;
+                    }
+                    break;
+
+                case STATE_LENGTH:
+                    if ((buffer[index] == CR) ||
+                            (buffer[index] == LF)) {
+                    }
                     break;
 
                 case STATE_SKIP:
@@ -401,8 +492,68 @@ ngx_http_auth_totp_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child) {
     ngx_conf_merge_value(conf->skew, prev->skew, 1);
     ngx_conf_merge_sec_value(conf->start, prev->start, 0);
     ngx_conf_merge_sec_value(conf->step, prev->start, 30);
+    ngx_conf_merge_str_value(conf->cookie, prev->cookie, "totp");
+    ngx_conf_merge_sec_value(conf->expiry, prev->expiry, 0);
 
     return NGX_CONF_OK;
+}
+
+
+static ngx_int_t
+ngx_http_auth_totp_set_cookie(ngx_http_request_t *r) {
+    ngx_http_auth_totp_loc_conf_t *lcf;
+    ngx_table_elt_t *set_cookie;
+    uint32_t result, value1, value2;
+    u_char *cookie, *ptr, expiry[16];
+    size_t len;
+
+    /*
+        This function is intended to set a session cookie following successful 
+        authentication by a client. This is required as the password provided by the 
+        client in the authentication request will rotate (by design) and cannot be 
+        relied upon for continued access to protected resources. Accordingly, a 
+        session cookie is set and retrieved by this module, in preference to the 
+        TOTP authentication, to ensure continued resource access following 
+        authentication.
+    */
+
+    lcf = ngx_http_get_module_loc_conf(r, ngx_http_auth_totp_module);
+    /* assert(lcf != NULL); */
+    len = lcf->cookie.len + sizeof("; HttpOnly") + 24 /* - 1 + 1 */;
+    if (lcf->expiry) {
+        /* ngx_memzero(expiry, sizeof(expiry)); */
+        ngx_snprintf(expiry, sizeof(expiry), "%ui", lcf->expiry);
+        len += sizeof("; Max-Age=") + ngx_strlen(expiry) - 1;
+    }
+
+    value1 = (uint32_t) ngx_random();
+    value2 = (uint32_t) ngx_random();
+    result = value1 ^ value2;
+
+    cookie = ngx_pnalloc(r->pool, len);
+    if (cookie == NULL) {
+        return NGX_ERROR;
+    }
+    ptr = ngx_copy(cookie, lcf->cookie.data, lcf->cookie.len);
+    *ptr++ = '=';
+    ptr = ngx_sprintf(ptr, "%08xd%08xd%08xd; HttpOnly",
+            value1,
+            value2,
+            result);
+    if (lcf->expiry) {
+        ptr = ngx_sprintf(ptr, "; Max-Age=%ui", lcf->expiry);
+    }
+
+    set_cookie = ngx_list_push(&r->headers_out.headers);
+    if (set_cookie == NULL) {
+        return NGX_ERROR;
+    }
+    set_cookie->hash = 1;
+    ngx_str_set(&set_cookie->key, "Set-Cookie");
+    set_cookie->value.len = ptr - cookie;
+    set_cookie->value.data = cookie;
+
+    return NGX_OK;
 }
 
 
@@ -473,13 +624,14 @@ ngx_http_auth_totp_validation(ngx_http_request_t *r, ngx_str_t *realm, u_char *k
                 digits, ngx_http_auth_totp_algorithm_hotp(key, length, count - index, digits));
         if (ngx_strncmp(r->headers_in.passwd.data, buffer, digits) == 0) {
             ngx_log_error(NGX_LOG_INFO, r->connection->log, 0,
-                    "user \"%*s\", code %*s, skew %ui",
+                    "%s: user \"%*s\", code %*s, skew %ui",
+                    MODULE_NAME,
                     r->headers_in.user.len,
                     r->headers_in.user.data,
                     digits,
                     buffer,
                     index);
-            return NGX_OK;
+            return ngx_http_auth_totp_set_cookie(r);
         }
     }
 

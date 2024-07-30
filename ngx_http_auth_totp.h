@@ -21,6 +21,7 @@ typedef enum {
     STATE_SECRET,
     STATE_START,
     STATE_STEP,
+    STATE_LENGTH,
     STATE_SKIP
 }
 ngx_http_auth_totp_state_e;
@@ -32,6 +33,8 @@ typedef struct {
     ngx_int_t skew;
     time_t start;
     time_t step;
+    ngx_str_t cookie;
+    time_t expiry;
 }
 ngx_http_auth_totp_loc_conf_t;
 

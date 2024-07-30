@@ -25,10 +25,32 @@ To build the nginx-http-auth-totp module from the Nginx source directory:
             auth_totp_length 8;
             auth_totp_skew 1;
             auth_totp_step 1m;
+            auth_totp_cookie "totp-session";
+            auth_totp_expiry 1d;
         }
     }
 
 ## Directives
+
+### auth_totp_cookie
+
+* **syntax:** `auth_totp_cookie <name>`
+* **default:** `totp`
+* **context:** `http`, `server`, `location`, `limit_except`
+
+Specifies the name of the HTTP cookie to be used for tracking authenticated clients.
+
+As the validity of the time-based one-time password used for authentication expires (by design), a HTTP cookie is set following successful authentication in order to persist client authentication beyond the TOTP validity window. This configuration directives specifies the name to be used when setting this cookie while the expiry period for this cookie may be set using the `auth_totp_expiry` directive. 
+
+### auth_totp_expiry
+
+* **syntax:** `auth_totp_expiry <interval>`
+* **default:** `0s`
+* **context:** `http`, `server`, `location`, `limit_except`
+
+Specifies the expiry time for the HTTP cookie to be used for tracking authenticated clients.
+
+If this expiry value is not specified, the HTTP cookie used for tracking authenticated clients will be set as a session cookie which will be deleted when the current HTTP client session ends. It is important to note that the browser defines when the "current session" ends, and some browsers use session restoration when restarting, which can cause session cookies to last indefinitely.
 
 ### auth_totp_file
 
