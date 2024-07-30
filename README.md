@@ -47,7 +47,7 @@ To build the nginx-http-auth-totp module from the Nginx source directory:
 
 Specifies the name of the HTTP cookie to be used for tracking authenticated clients.
 
-As the validity of the time-based one-time password used for authentication expires (by design), a HTTP cookie is set following successful authentication in order to persist client authentication beyond the TOTP validity window. This configuration directives specifies the name to be used when setting this cookie while the expiry period for this cookie may be set using the `auth_totp_expiry` directive. 
+As the validity of the Time-based One-Time Password (TOTP) used for authentication expires (by design), a HTTP cookie is set following successful authentication in order to persist client authentication beyond the TOTP validity window. This configuration directives specifies the name to be used when setting this cookie while the expiry period for this cookie may be set using the `auth_totp_expiry` directive. 
 
 ### auth_totp_expiry
 
@@ -57,7 +57,7 @@ As the validity of the time-based one-time password used for authentication expi
 
 Specifies the expiry time for the HTTP cookie to be used for tracking authenticated clients.
 
-If this expiry value is not specified, the HTTP cookie used for tracking authenticated clients will be set as a session cookie which will be deleted when the current HTTP client session ends. It is important to note that the browser defines when the "current session" ends, and some browsers use session restoration when restarting, which can cause session cookies to last indefinitely.
+If this expiry value is not specified (or set to zero), the HTTP cookie used for tracking authenticated clients will be set as a session cookie which will be deleted when the current HTTP client session ends. It is important to note that the browser defines when the "current session" ends, and some browsers use session restoration when restarting, which can cause session cookies to last indefinitely.
 
 ### auth_totp_file
 
@@ -65,20 +65,14 @@ If this expiry value is not specified, the HTTP cookie used for tracking authent
 * **default:** -
 * **context:** `http`, `server`, `location`, `limit_except`
 
-Specifies the file that contains usernames, shared secrets, and optionally, the UNIX start time, time step in seconds, and password truncation length, for time-based one-time password authentication. 
+Specifies the file that contains usernames and shared secrets for Time-based One-Time Password (TOTP) authentication. 
 
 This configuration file has the format:
 
     # comment
     user1:secret1
-    user2:secret2:start2
-    user3:secret3:start3:step3
-    user4:secret4:start4:step4:length4
-    user5:secret5
-
-If the UNIX start time (in seconds since 1970/01/01), the time step size (in seconds), or the password truncation length, is specified in association with a user definition within this file, these values will override any values defined independently via the configuration directives `auth_totp_start`, `auth_totp_step` or `auth_totp_length`.
-
-If the UNIX start time is specified - either within the TOTP definition file or by way of the `auth_totp_start` configuration directive - and represents a time in the future, the authentication request for the given user account will fail.
+    user2:secret2
+    user3:secret3
 
 ### auth_totp_length
 
@@ -96,7 +90,7 @@ If the supplied TOTP is of a different length to this value, the authentication 
 * **default:** `off`
 * **context:** `http`, `server`, `location`, `limit_except`
 
-Enables validation of user name and time-based one-time password using the "HTTP Basic Authentication" protocol. The specified parameter is used as the `realm` for this authentication. This parameter value can contain variables. The special value of `off` cancels the application of any `auth_totp_realm` directive inherited from a higher configuration level.
+Enables validation of user name and Time-based One-Time Password (TOTP) using the "HTTP Basic Authentication" protocol. The specified parameter is used as the `realm` for this authentication. This parameter value can contain variables. The special value of `off` cancels the application of any `auth_totp_realm` directive inherited from a higher configuration level.
 
 ### auth_totp_skew
 
@@ -116,11 +110,9 @@ It is important to note that larger acceptable delay windows represent a larger 
 * **default:** `0`
 * **context:** `http`, `server`, `location`, `limit_except`
 
-Specifies the UNIX time from which to start counting time steps as part of TOTP algorithm operations.
+Specifies the UNIX time from which to start counting time steps as part of Time-based One-Time Password (TOTP) algorithm operations.
 
 The default value is 0, the UNIX epoch at 1970/01/01. 
-
-If the UNIX start time specified - either within this directive or in the configuration file specified by the `auth_totp_file` directive - represents a time in the future, authentication will be denied.
 
 ### auth_totp_step
 
@@ -128,7 +120,7 @@ If the UNIX start time specified - either within this directive or in the config
 * **default:** `30s`
 * **context:** `http`, `server`, `location`, `limit_except`
 
-Specifies the time step as part of TOTP algorithm operations.
+Specifies the time step as part of Time-based One-Time Password (TOTP) algorithm operations.
 
 ## References
 
