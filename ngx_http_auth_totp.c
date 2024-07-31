@@ -409,39 +409,13 @@ ngx_http_auth_totp_handler(ngx_http_request_t *r) {
                                 lcf->length);
                         goto finish;
                     }
-                    if (buffer[index] == ':') {
-                        state = STATE_START;
-                        break;
-                    }
 
                     ++length;
                     break;
 
                 case STATE_START:
-                    if ((buffer[index] == CR) ||
-                            (buffer[index] == LF)) {
-                    }
-                    if (buffer[index] == ':') {
-                        state = STATE_STEP;
-                        break;
-                    }
-                    break;
-
                 case STATE_STEP:
-                    if ((buffer[index] == CR) ||
-                            (buffer[index] == LF)) {
-                    }
-                    if (buffer[index] == ':') {
-                        state = STATE_LENGTH;
-                    }
-                    break;
-
                 case STATE_LENGTH:
-                    if ((buffer[index] == CR) ||
-                            (buffer[index] == LF)) {
-                    }
-                    break;
-
                 case STATE_SKIP:
                 default:
                     if (buffer[index] == LF) {
