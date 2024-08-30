@@ -1,9 +1,9 @@
-#include <stdint.h>
-#include <time.h>
-
 #include <ngx_config.h>
 #include <ngx_core.h>
 #include <ngx_http.h>
+
+#include <stdint.h>
+#include <time.h>
 
 #include <openssl/hmac.h>
 
