@@ -23,19 +23,13 @@ make
 make install
 ```
 
-## Alternative Installation Methods
+## Packages
 
 For users who prefer pre-built and optimized packages, the nginx-http-auth-totp module can be installed from the [GetPageSpeed repository](https://nginx-extras.getpagespeed.com/modules/auth-totp/):
 
 ```bash
 dnf -y install https://extras.getpagespeed.com/release-latest.rpm 
 dnf -y install nginx-module-auth-totp
-```
-
-Enable the module by adding the following at the top of `/etc/nginx/nginx.conf`:
-
-```nginx
-load_module modules/ngx_http_auth_totp_module.so;
 ```
 
 ## Configuration
@@ -54,6 +48,12 @@ server {
         auth_totp_expiry 1d;
     }
 }
+```
+
+Enable the module by adding the following at the top of `/etc/nginx/nginx.conf`:
+
+```nginx
+load_module modules/ngx_http_auth_totp_module.so;
 ```
 
 ## Directives
