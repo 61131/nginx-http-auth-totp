@@ -17,25 +17,44 @@ The nginx-http-auth-totp module provides TOTP authentication for a Nginx server.
 
 To build the nginx-http-auth-totp module from the Nginx source directory:
 
-    ./configure --add-module=/path/to/nginx-http-auth-totp
-    make
-    make install
+```bash
+./configure --add-module=/path/to/nginx-http-auth-totp
+make
+make install
+```
+
+## Alternative Installation Methods
+
+For users who prefer pre-built and optimized packages, the nginx-http-auth-totp module can be installed from the [GetPageSpeed repository](https://nginx-extras.getpagespeed.com/modules/auth-totp/):
+
+```bash
+dnf -y install https://extras.getpagespeed.com/release-latest.rpm 
+dnf -y install nginx-module-auth-totp
+```
+
+Enable the module by adding the following at the top of `/etc/nginx/nginx.conf`:
+
+```nginx
+load_module modules/ngx_http_auth_totp_module.so;
+```
 
 ## Configuration
 
-    server {
-        listen 80;
+```nginx
+server {
+    listen 80;
 
-        location /protected {
-            auth_totp_realm "Protected";
-            auth_totp_file /etc/nginx/totp.conf;
-            auth_totp_length 8;
-            auth_totp_skew 1;
-            auth_totp_step 1m;
-            auth_totp_cookie "totp-session";
-            auth_totp_expiry 1d;
-        }
+    location /protected {
+        auth_totp_realm "Protected";
+        auth_totp_file /etc/nginx/totp.conf;
+        auth_totp_length 8;
+        auth_totp_skew 1;
+        auth_totp_step 1m;
+        auth_totp_cookie "totp-session";
+        auth_totp_expiry 1d;
     }
+}
+```
 
 ## Directives
 
