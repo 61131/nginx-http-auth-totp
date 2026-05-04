@@ -1,0 +1,47 @@
+name: "Tests automation"
+on:
+  push:
+  pull_request: 
+  workflow_dispatch:
+jobs:
+  tests:
+    strategy:
+      matrix:
+        nginx: ["https://nginx.org/en/CHANGES-1.28", "https://nginx.org/en/CHANGES"]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install pre-requisites
+        run: |
+          sudo apt-get update
+          sudo apt install build-essential curl python3-pyotp ntpdate -y
+          sudo ntpdate -u 0.pool.ntp.org
+      - name: Install nginx sources
+        run: |
+          NGINX_VERSION=$( curl --silent ${{ matrix.nginx }} -q | grep "Changes with nginx" | head -n1 | cut -d\  -f4 )     
+          # Download
+          curl -fLO --progress-bar https://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz
+          # extract
+          tar -xzf nginx-${NGINX_VERSION}.tar.gz
+          cd nginx-${NGINX_VERSION}
+          # configure
+          ./configure --add-module=..
+          # build
+          make
+          # install
+          sudo make install
+      - name: Setup nginx
+        run: |
+          sudo cp tests/*.conf /etc/nginx/
+          sudo mkdir /usr/local/nginx/html/public          
+          sudo mkdir /usr/local/nginx/html/priv6d30s
+          sudo mkdir /usr/local/nginx/html/priv6d30s/public
+          sudo mkdir /usr/local/nginx/html/priv8d60s
+          sudo bash -c "echo \"I'm public\" > /usr/local/nginx/html/public/index.html"
+          sudo bash -c "echo \"I'm private\" > /usr/local/nginx/html/priv6d30s/index.html"
+          sudo cp /usr/local/nginx/html/public/index.html /usr/local/nginx/html/priv6d30s/public/
+          sudo cp /usr/local/nginx/html/priv6d30s/index.html /usr/local/nginx/html/priv8d60s/
+      - name: Run tests
+        run: |
+          sudo /usr/local/nginx/sbin/nginx -c /etc/nginx/nginx.conf -e stderr
+          bash tests/test.sh
