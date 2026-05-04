@@ -44,6 +44,7 @@ typedef struct {
     time_t expiry;
     ngx_flag_t reuse;
     ngx_shm_zone_t *shm;
+    ngx_str_t totp_secret;
 }
 ngx_http_auth_totp_loc_conf_t;
 

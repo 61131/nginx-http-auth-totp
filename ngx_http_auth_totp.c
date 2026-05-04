@@ -6,9 +6,11 @@
 #include <time.h>
 
 #include <openssl/hmac.h>
+#include <openssl/evp.h>
 
 #include "ngx_http_auth_totp.h"
 
+#define NGX_HTTP_AUTH_COOKIE_HMAC_LEN (2u * (size_t)EVP_MD_size(EVP_sha1())) /* 40 bytes hex */
 
 static uint32_t ngx_http_auth_totp_algorithm_hotp(u_char *key, size_t length, uint64_t count, size_t digits);
 
@@ -34,6 +36,7 @@ static ngx_int_t ngx_http_auth_totp_shm_initialise(ngx_shm_zone_t *shm_zone, voi
 
 static ngx_int_t ngx_http_auth_totp_validation(ngx_http_request_t *r, ngx_str_t *realm, u_char *key, size_t length, time_t start, time_t step, size_t digits);
 
+static u_char * ngx_http_auth_totp_generate_hmac_hex(u_char *buf, size_t buf_len, u_char *msg, size_t msg_len, ngx_str_t secret_key);
 
 static ngx_int_t powi[] = { 1, 10, 100, 1000, 10000, 100000, 1000000, 10000000, 100000000 };
 
@@ -45,6 +48,13 @@ static ngx_command_t ngx_http_auth_totp_directives[] = {
             ngx_conf_set_str_slot,
             NGX_HTTP_LOC_CONF_OFFSET,
             offsetof(ngx_http_auth_totp_loc_conf_t, cookie),
+            NULL },
+
+    { ngx_string("auth_totp_secret"),
+            NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_HTTP_LMT_CONF|NGX_CONF_TAKE1,
+            ngx_conf_set_str_slot,
+            NGX_HTTP_LOC_CONF_OFFSET,
+            offsetof(ngx_http_auth_totp_loc_conf_t, totp_secret),
             NULL },
 
     { ngx_string("auth_totp_expiry"),
@@ -206,8 +216,15 @@ ngx_http_auth_totp_get_cookie(ngx_http_request_t *r) {
     ngx_http_auth_totp_loc_conf_t *lcf;
     ngx_table_elt_t *cookie;
     ngx_str_t value;
-    uint32_t result, value1, value2;
-    u_char buffer[9];
+    ngx_str_t payload;
+    ngx_str_t signature;
+    ngx_str_t encoded_username;
+    ngx_str_t decoded_username;
+    ngx_str_t expiration;
+    u_char *split_point;
+    time_t expiration_time;
+    u_char server_sig[NGX_HTTP_AUTH_COOKIE_HMAC_LEN];
+    u_char *server_sig_end;
 
     /*
         This function is intended to return true if a HTTP cookie has been set 
@@ -223,25 +240,90 @@ ngx_http_auth_totp_get_cookie(ngx_http_request_t *r) {
         return 0;
     }
 
-    /*
-        It should be noted that the validation mechanism for the cookie value is 
-        very primitive, merely checking to see whether the value appears to have 
-        been set by this module. This is because there is no inherent value in the
-        cookie beyond its' presence in the HTTP request.
-    */
-
-    if (value.len != 24) {
+    split_point = ngx_strlchr(value.data, value.data + value.len, '|');
+    if (split_point == NULL) {
+        ngx_log_error(NGX_LOG_INFO, r->connection->log, 0,
+                "%s: missing separator '|' in cookie",
+                MODULE_NAME);
         return 0;
     }
-    ngx_memzero(buffer, sizeof(buffer));
-    ngx_memmove(buffer, &value.data[0], 8);
-    value1 = strtoul((char *)buffer, (char **)NULL, 16);
-    ngx_memmove(buffer, &value.data[8], 8);
-    value2 = strtoul((char *)buffer, (char **)NULL, 16);
-    ngx_memmove(buffer, &value.data[16], 8);
-    result = strtoul((char *)buffer, (char **)NULL, 16);
 
-    return ((value1 ^ value2) == result);
+    payload.data = value.data;
+    payload.len = split_point - payload.data;
+
+    signature.data = split_point + 1;
+    signature.len = (value.data + value.len) - (split_point + 1);
+    if (NGX_HTTP_AUTH_COOKIE_HMAC_LEN != signature.len) {
+        ngx_log_error(NGX_LOG_INFO, r->connection->log, 0,
+                "%s: incorrect cookie signature length (got %d, expected %d)",
+                MODULE_NAME, signature.len, NGX_HTTP_AUTH_COOKIE_HMAC_LEN);
+        return 0;
+    }
+
+    split_point = ngx_strlchr(payload.data, payload.data + payload.len, '^');
+    if (split_point == NULL) {
+        ngx_log_error(NGX_LOG_INFO, r->connection->log, 0,
+                "%s: missing separator '^' in cookie", MODULE_NAME);
+        return 0;
+    }
+    encoded_username.data = payload.data;
+    encoded_username.len = split_point - encoded_username.data;
+    expiration.data = split_point + 1;
+    expiration.len = payload.len - (encoded_username.len + 1);
+
+    //  Deny access if cookie format is invalid
+    if (encoded_username.len == 0 || expiration.len == 0) {
+        ngx_log_error(NGX_LOG_INFO, r->connection->log, 0,
+                "%s: cookie format is invalid", MODULE_NAME);
+        return 0;
+    }
+
+    //  Check if expiration date has passed
+    expiration_time = ngx_atotm(expiration.data, expiration.len);
+    if ((expiration_time == NGX_ERROR) ||
+            ((expiration_time != 0) && (expiration_time < ngx_time()))) {
+        ngx_log_error(NGX_LOG_DEBUG, r->connection->log, 0,
+                "%s: cookie is expired or invalid (timestamp:%T now:%T)",
+                MODULE_NAME, expiration_time, ngx_time());
+        return 0;
+    }
+
+    //  Check cookie username against basic auth username
+    decoded_username.len = encoded_username.len + 1; // More than long enough
+    decoded_username.data = ngx_pnalloc(r->pool, decoded_username.len);
+    if (decoded_username.data == NULL) {
+        ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
+                "%s: failed to decode username of length %uz",
+                MODULE_NAME, encoded_username.len);
+        return 0;
+    }
+    //  Note: ngx_decode_base64() changes len property to the exact decoded length
+    if (ngx_decode_base64url(&decoded_username, &encoded_username) != NGX_OK) {
+        ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
+                "%s: base64 decoding unsuccessful", MODULE_NAME);
+        return 0;
+    }
+    if (decoded_username.len != r->headers_in.user.len ||
+            (ngx_memcmp(decoded_username.data, r->headers_in.user.data,
+            decoded_username.len) != 0)) {
+        ngx_log_error(NGX_LOG_INFO, r->connection->log, 0,
+                "%s: cookie username mismatch", MODULE_NAME);
+        return 0;
+    }
+
+    //  Verify cookie authenticity
+    server_sig_end = ngx_http_auth_totp_generate_hmac_hex(server_sig, sizeof(server_sig),
+            payload.data, payload.len, lcf->totp_secret);
+    if (server_sig_end != (server_sig + sizeof(server_sig))) {
+        return 0;
+    }
+    if (CRYPTO_memcmp(server_sig, signature.data, NGX_HTTP_AUTH_COOKIE_HMAC_LEN) != 0) {
+        ngx_log_error(NGX_LOG_WARN, r->connection->log, 0,
+                "%s: invalid cookie signature", MODULE_NAME);
+        return 0;
+    }
+
+    return 1;
 }
 
 
@@ -304,8 +386,12 @@ ngx_http_auth_totp_handler(ngx_http_request_t *r) {
             (ngx_strncasecmp(realm.data, (u_char *) "off", 3) == 0)) {
         return NGX_DECLINED;
     }
-    if (ngx_http_auth_totp_get_cookie(r) != 0) {
-        return NGX_OK;
+
+    if (lcf->totp_secret.len == 0) {
+        ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
+                "%s: auth_totp_secret not set; denying request",
+                MODULE_NAME);
+        return NGX_DECLINED;
     }
 
     /*
@@ -321,6 +407,10 @@ ngx_http_auth_totp_handler(ngx_http_request_t *r) {
     }
     if (rc == NGX_ERROR) {
         return NGX_HTTP_INTERNAL_SERVER_ERROR;
+    }
+
+    if (ngx_http_auth_totp_get_cookie(r) != 0) {
+        return NGX_OK;
     }
 
     /*
@@ -361,7 +451,6 @@ ngx_http_auth_totp_handler(ngx_http_request_t *r) {
     length = 0;
     offset = 0;
     state = STATE_USER;
-    rc = NGX_OK;
 
     for (;;) {
         rv = ngx_read_file(&file, buffer + count, NGX_HTTP_AUTH_TOTP_BUF_SIZE - count, offset);
@@ -460,6 +549,8 @@ ngx_http_auth_totp_handler(ngx_http_request_t *r) {
     // user not found in TOTP file
     rc = ngx_http_auth_totp_set_realm(r, &realm);
 
+    rc = ngx_http_auth_totp_set_realm(r, &realm);
+
 finish:
     if (ngx_close_file(file.fd) == NGX_FILE_ERROR) {
         ngx_log_error(NGX_LOG_ALERT, r->connection->log, ngx_errno,
@@ -499,6 +590,7 @@ ngx_http_auth_totp_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child) {
     ngx_conf_merge_sec_value(conf->start, prev->start, 0);
     ngx_conf_merge_sec_value(conf->step, prev->start, 30);
     ngx_conf_merge_str_value(conf->cookie, prev->cookie, "totp");
+    ngx_conf_merge_str_value(conf->totp_secret, prev->totp_secret, "");
     ngx_conf_merge_sec_value(conf->expiry, prev->expiry, 0);
     ngx_conf_merge_value(conf->reuse, prev->reuse, 0);
 
@@ -667,8 +759,8 @@ static ngx_int_t
 ngx_http_auth_totp_set_cookie(ngx_http_request_t *r) {
     ngx_http_auth_totp_loc_conf_t *lcf;
     ngx_table_elt_t *set_cookie;
-    uint32_t result, value1, value2;
-    u_char *cookie, *ptr, expiry[16];
+    u_char *cookie, *ptr;
+    ngx_str_t payload_str;
     size_t len;
 
     /*
@@ -683,16 +775,23 @@ ngx_http_auth_totp_set_cookie(ngx_http_request_t *r) {
 
     lcf = ngx_http_get_module_loc_conf(r, ngx_http_auth_totp_module);
     /* assert(lcf != NULL); */
-    len = lcf->cookie.len + sizeof("; HttpOnly") + 24 /* - 1 + 1 */;
-    if (lcf->expiry) {
-        /* ngx_memzero(expiry, sizeof(expiry)); */
-        ngx_snprintf(expiry, sizeof(expiry), "%ui", lcf->expiry);
-        len += sizeof("; Max-Age=") + ngx_strlen(expiry) - 1;
+
+    if (r->headers_in.user.len == 0) {
+        return NGX_ERROR;
     }
 
-    value1 = (uint32_t) ngx_random();
-    value2 = (uint32_t) ngx_random();
-    result = value1 ^ value2;
+    //  Allocate buffer sufficient for "cookiename=user^expiry|hmac; HttpOnly"
+    len = lcf->cookie.len
+            + 1                                 // =
+            + ngx_base64_encoded_length(r->headers_in.user.len)
+            + 1                                 // ^
+            + NGX_INT64_LEN                     // time is cast to int64_t in ngx_vslprintf()
+            + 1                                 // |
+            + NGX_HTTP_AUTH_COOKIE_HMAC_LEN
+            + sizeof("; HttpOnly");
+    if (lcf->expiry) {
+        len += sizeof("; Max-Age=") + NGX_INT64_LEN;
+    }
 
     cookie = ngx_pnalloc(r->pool, len);
     if (cookie == NULL) {
@@ -700,10 +799,42 @@ ngx_http_auth_totp_set_cookie(ngx_http_request_t *r) {
     }
     ptr = ngx_copy(cookie, lcf->cookie.data, lcf->cookie.len);
     *ptr++ = '=';
-    ptr = ngx_sprintf(ptr, "%08xd%08xd%08xd; HttpOnly",
-            value1,
-            value2,
-            result);
+
+    //  Add username (base64 encoded) and time
+    payload_str.data = ptr;
+    payload_str.len = (cookie + len) - ptr;
+    ngx_encode_base64url(&payload_str, &r->headers_in.user);
+    if (payload_str.len < r->headers_in.user.len) {
+        // This should not be possible, but we check anyway
+        ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
+                "%s: cookie username encoding failed",
+                MODULE_NAME);
+        return NGX_ERROR;
+    }
+    ptr += payload_str.len;
+    *ptr++ = '^';
+
+    if (lcf->expiry != 0) {
+        ptr = ngx_sprintf(ptr,"%T", ngx_time() + (time_t) lcf->expiry);
+    }
+    else {
+        *ptr++ = '0';
+    }
+    *ptr++ = '|';
+
+    //  Compute HMAC over the cookie payload
+    ptr = ngx_http_auth_totp_generate_hmac_hex(ptr, len - (ptr - cookie),
+            payload_str.data,
+            (ptr - 1) - payload_str.data,
+            lcf->totp_secret);
+    if (ptr == NULL) {
+        ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
+                "%s: cookie HMAC generation failed", MODULE_NAME);
+        return NGX_ERROR;
+    }
+
+    //  Finish up the cookie
+    ptr = ngx_cpystrn(ptr, (u_char *) "; HttpOnly", (cookie + len) - ptr);
     if (lcf->expiry) {
         ptr = ngx_sprintf(ptr, "; Max-Age=%ui", lcf->expiry);
     }
@@ -776,11 +907,53 @@ ngx_http_auth_totp_shm_initialise(ngx_shm_zone_t *shm_zone, void *data) {
 }
 
 
+static u_char *
+ngx_http_auth_totp_generate_hmac_hex(u_char *buf, size_t buf_len, u_char *msg, size_t msg_len, ngx_str_t secret_key) {
+    u_char *ptr = buf;
+    unsigned int digest_len = 0;
+    unsigned int hex_len;
+    unsigned char raw_buf[NGX_HTTP_AUTH_COOKIE_HMAC_LEN / 2];
+
+    if (buf_len < (NGX_HTTP_AUTH_COOKIE_HMAC_LEN)) {
+        return NULL; // Caller's buffer is too small
+    }
+
+    if (secret_key.len > INT_MAX) {
+        return NULL; // Key is too long
+    }
+
+    //  Write the raw HMAC into stack-allocated raw_buf
+    if (HMAC(EVP_sha1(),
+            secret_key.data, (int) secret_key.len,
+            msg, msg_len,
+            raw_buf, &digest_len) == NULL) {
+        return NULL;
+    }
+
+    if (digest_len != NGX_HTTP_AUTH_COOKIE_HMAC_LEN/2) {
+        return NULL;
+    }
+
+    //  Hex-encode the raw HMAC directly into passed-in buf
+    for (hex_len = 0; ptr && hex_len < digest_len; ++hex_len) {
+      ptr = ngx_sprintf(ptr, "%02uxd", raw_buf[hex_len]);
+    }
+
+    if (ptr != (buf + digest_len * 2)) {
+        return NULL;
+    }
+
+    //  Return pointer to end of output hex
+    return ptr;
+}
+
+
 static ngx_int_t
 ngx_http_auth_totp_validation(ngx_http_request_t *r, ngx_str_t *realm, u_char *key, size_t length, time_t start, time_t step, size_t digits) {
     ngx_http_auth_totp_loc_conf_t *lcf;
     uint64_t count, index;
     u_char buffer[8];
+    char fmt[] = "%00uD"; // Don't change without adjusting manipulation below
     time_t now;
 
     /*
@@ -798,6 +971,7 @@ ngx_http_auth_totp_validation(ngx_http_request_t *r, ngx_str_t *realm, u_char *k
     if (r->headers_in.passwd.len != digits) {
         return ngx_http_auth_totp_set_realm(r, realm);
     }
+    fmt[2] = '0' + digits;
 
     now = time(NULL);
     if (start > now) {
@@ -809,8 +983,8 @@ ngx_http_auth_totp_validation(ngx_http_request_t *r, ngx_str_t *realm, u_char *k
 
     for (index = 0; index <= (uint64_t)lcf->skew; index++) {
         /* assert(count >= index); */
-        ngx_snprintf(buffer, sizeof(buffer), "%0*i", 
-                digits, ngx_http_auth_totp_algorithm_hotp(key, length, count - index, digits));
+        ngx_snprintf(buffer, sizeof(buffer), fmt,
+                ngx_http_auth_totp_algorithm_hotp(key, length, count - index, digits));
         if (ngx_strncmp(r->headers_in.passwd.data, buffer, digits) == 0) {
 
             if (ngx_http_auth_totp_reuse_check(r, count - index) != 0) {

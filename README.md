@@ -40,6 +40,7 @@ server {
 
     location /protected {
         auth_totp_realm "Protected";
+        auth_totp_secret "Secret";
         auth_totp_file /etc/nginx/totp.conf;
         auth_totp_length 8;
         auth_totp_reuse off;
@@ -119,6 +120,14 @@ Enables validation of user name and Time-based One-Time Password (TOTP) using th
 * **context:**  `http`, `server`, `location`, `limit_except`
 
 Enables the reuse of a Time-based One-Time Password (TOTP) within a validity window. While this is non-standard behaviour per [RFC 6238](https://datatracker.ietf.org/doc/html/rfc6238), it provides a convenient manner to ensure a minimum window of validity for generated TOTP codes, even if the TOTP has already been presented to the validating system.
+
+### auth_totp_secret
+
+* **syntax:** `auth_totp_secret <string>`
+* **default:** -
+* **context:** `http`, `server`, `location`, `limit_except`
+
+A server-side secret used when generating session cookies and then when validating session cookies. If an attacker knows this secret, they will be able to forge session cookies that grant access, so it is vital that it be difficult to guess.
 
 ### auth_totp_skew
 
